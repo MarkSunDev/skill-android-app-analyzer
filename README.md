@@ -38,6 +38,15 @@ This repository now includes a root `.claude-plugin/marketplace.json`, so it can
 
 The marketplace name is `marksundev-skills` and the plugin name is `android-app-analyzer`.
 
+### Install with Dvcode AI
+
+Install from the repository marketplace and then install the plugin:
+
+```bash
+/skill marketplace add https://github.com/MarkSunDev/skill-android-app-analyzer
+/plugin install skill-android-app-analyzer:android-app-analyzer
+```
+
 ### Install as a Codex Skill (Recommended)
 
 Install directly from GitHub with the skills CLI:

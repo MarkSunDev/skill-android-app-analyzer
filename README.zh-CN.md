@@ -38,6 +38,15 @@
 
 其中 marketplace 名称是 `marksundev-skills`，插件名是 `android-app-analyzer`。
 
+### 使用 Dvcode AI 安装
+
+先添加仓库 marketplace，再安装插件：
+
+```bash
+/skill marketplace add https://github.com/MarkSunDev/skill-android-app-analyzer
+/plugin install skill-android-app-analyzer:android-app-analyzer
+```
+
 ### 安装为 Codex Skill（推荐）
 
 推荐直接通过 GitHub 仓库配合 skills CLI 安装：
