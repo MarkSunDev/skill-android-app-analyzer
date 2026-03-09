@@ -1,0 +1,32 @@
+{
+  "name": "codex-skill-android-app-analyzer",
+  "version": "0.1.0",
+  "description": "Codex skill source package for analyzing Android APK/XAPK files and generating manifest-based reports.",
+  "license": "MIT",
+  "files": [
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "android_analyzer.py",
+    "apkcombo_download.py",
+    "dependency_bootstrap.py",
+    "requirements.txt",
+    "docs/plans"
+  ],
+  "keywords": [
+    "codex-skill",
+    "skill",
+    "android",
+    "apk",
+    "xapk",
+    "manifest",
+    "androguard"
+  ],
+  "scripts": {
+    "check:package": "npm pack --dry-run",
+    "test:python": "python3 -m unittest discover -s tests -v"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

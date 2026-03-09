@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.deepvcode/
+.venv/
+env/
+venv/
+node_modules/
+*.tgz
+*.apk
+*.xapk
+*_analysis.md
+*_manifest.xml
+*_extracted/

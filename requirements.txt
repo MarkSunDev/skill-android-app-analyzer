@@ -1,0 +1,4 @@
+androguard
+beautifulsoup4
+lxml
+requests
