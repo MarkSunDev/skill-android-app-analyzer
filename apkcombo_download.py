@@ -102,6 +102,21 @@ def parse_variant_links(html_text):
     return variants
 
 
+def fetch_checkin_token(session):
+    """Fetch the APKCombo checkin token required by direct variant links."""
+
+    response = session.post(f"{BASE_URL}/checkin", headers={"Referer": BASE_URL})
+    response.raise_for_status()
+    return response.text.strip()
+
+
+def append_checkin_token(download_url, token, package_name):
+    """Attach the checkin token and required query parameters to a variant URL."""
+
+    separator = "&" if "?" in download_url else "?"
+    return f"{download_url}{separator}{token}&package_name={package_name}&lang=en"
+
+
 def select_variant(variants, preferred_type=None):
     """Pick the preferred variant when available, otherwise return the first."""
 
@@ -194,6 +209,23 @@ def fetch_variant_listing(session, download_page_url, package_name):
 
 def get_download_url(session, download_page_url, package_name, preferred_type=None):
     """Return the selected APK/XAPK download URL and resolved file type."""
+
+    download_page_response = session.get(download_page_url)
+    download_page_response.raise_for_status()
+
+    variants = parse_variant_links(download_page_response.text)
+    if variants:
+        variant = select_variant(variants, preferred_type=preferred_type)
+        if not variant:
+            raise RuntimeError("No APK/XAPK variant could be selected.")
+        token = fetch_checkin_token(session)
+        final_url = append_checkin_token(variant["href"], token, package_name)
+        print(f"    Selected variant: {variant['label'] or variant['type'].upper()}")
+        return final_url, variant["type"]
+
+    xid = extract_xid_from_html(download_page_response.text)
+    if not xid:
+        raise RuntimeError("Could not extract the APKCombo xid token from the download page.")
 
     variants_html = fetch_variant_listing(session, download_page_url, package_name)
     variants = parse_variant_links(variants_html)
