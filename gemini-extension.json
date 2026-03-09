@@ -1,6 +1,6 @@
 {
   "name": "android-app-analyzer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Analyze Android APK/XAPK packages and generate manifest-based reports.",
   "author": "MarkSunDev",
   "license": "MIT",

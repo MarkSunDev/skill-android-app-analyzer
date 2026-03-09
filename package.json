@@ -1,6 +1,6 @@
 {
   "name": "skill-android-app-analyzer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude Code and Codex skill source package for analyzing Android APK/XAPK files and generating manifest-based reports.",
   "license": "MIT",
   "repository": {
@@ -17,6 +17,7 @@
     "README.md",
     "README.zh-CN.md",
     "LICENSE",
+    "gemini-extension.json",
     "android_analyzer.py",
     "apkcombo_download.py",
     "dependency_bootstrap.py",
