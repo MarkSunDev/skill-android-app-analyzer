@@ -1,177 +1,145 @@
 """Analyze an Android app package and generate a manifest-based Markdown report."""
 
+from __future__ import annotations
+
 import argparse
 import json
+from pathlib import Path
 import re
-import subprocess
 import sys
 import zipfile
 from datetime import datetime
-from pathlib import Path
 
 from dependency_bootstrap import DependencyBootstrapError, DependencySpec, ensure_dependencies
+from workspace_manager import (
+    WorkspaceLimitError,
+    create_package_workspace,
+    ensure_workspace_capacity,
+    resolve_workspace_root,
+)
 
-try:
+SCRIPT_DIR = Path(__file__).parent.resolve()
+APK = None
+etree = None
+
+
+def ensure_analysis_dependencies():
+    """Load analysis dependencies only when they are actually needed."""
+
+    global APK, etree
+    if APK is not None and etree is not None:
+        return
+
     ensure_dependencies(
         [
             DependencySpec("androguard"),
             DependencySpec("lxml"),
         ]
     )
-except DependencyBootstrapError as exc:
-    print(exc)
-    sys.exit(1)
 
-# 抑制 androguard 的 debug/info 日志 (它用 loguru)
-try:
-    from loguru import logger as _loguru_logger
-    _loguru_logger.disable("androguard")
-except ImportError:
-    pass
+    try:
+        from loguru import logger as _loguru_logger
 
-from androguard.core.apk import APK
-from lxml import etree
+        _loguru_logger.disable("androguard")
+    except ImportError:
+        pass
 
-# ============================================================
-# 配置
-# ============================================================
+    from androguard.core.apk import APK as apk_class
+    from lxml import etree as etree_module
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-DOWNLOADER_PATH = SCRIPT_DIR / "apkcombo_download.py"
+    APK = apk_class
+    etree = etree_module
 
 
-# ============================================================
-# APK 下载
-# ============================================================
+def download_apk(package_name, downloads_dir):
+    """Download the latest package artifact into the managed downloads directory."""
 
-def download_apk(package_name, output_dir):
-    """调用 apkcombo_download.py 下载 APK/XAPK"""
-    if not DOWNLOADER_PATH.exists():
-        print(f"错误: 找不到下载脚本 {DOWNLOADER_PATH}")
-        return None
+    from apkcombo_download import download_package
 
     print("=" * 60)
-    print(f"阶段 1: 下载 APK")
+    print("Phase 1: Download package")
     print("=" * 60)
-
-    cmd = [
-        sys.executable, str(DOWNLOADER_PATH),
-        package_name,
-        "--output", str(output_dir),
-    ]
-    result = subprocess.run(cmd, cwd=str(SCRIPT_DIR))
-
-    if result.returncode != 0:
-        print("下载失败")
-        return None
-
-    # 查找刚下载的文件
-    candidates = []
-    for f in output_dir.iterdir():
-        if f.suffix in (".apk", ".xapk"):
-            candidates.append(f)
-
-    if not candidates:
-        print("错误: 未找到下载的文件")
-        return None
-
-    # 按修改时间取最新的
-    candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    downloaded = candidates[0]
-    print(f"\n下载文件: {downloaded.name} ({downloaded.stat().st_size / 1024 / 1024:.1f} MB)")
-    return downloaded
+    downloaded_path = download_package(package_name=package_name, output_dir=str(downloads_dir))
+    return Path(downloaded_path)
 
 
-# ============================================================
-# XAPK 处理
-# ============================================================
+def extract_apk_from_xapk(xapk_path, extracted_root):
+    """Extract the base APK from an XAPK package."""
 
-def extract_apk_from_xapk(xapk_path, output_dir):
-    """从 XAPK 文件中提取 base APK"""
-    print(f"\n处理 XAPK: {xapk_path.name}")
-
+    print(f"\nProcessing XAPK: {xapk_path.name}")
     if not zipfile.is_zipfile(xapk_path):
-        print("错误: XAPK 文件无效 (不是有效的 ZIP)")
+        print("Error: the XAPK file is not a valid ZIP archive.")
         return None
 
-    extract_dir = output_dir / f"{xapk_path.stem}_extracted"
-    extract_dir.mkdir(exist_ok=True)
+    extract_dir = extracted_root / xapk_path.stem
+    extract_dir.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(xapk_path, "r") as zf:
-        names = zf.namelist()
-        print(f"    XAPK 内容: {len(names)} 个文件")
+    with zipfile.ZipFile(xapk_path, "r") as archive:
+        names = archive.namelist()
+        print(f"    Archive entries: {len(names)}")
 
-        # 读取 manifest.json (XAPK 元数据)
         xapk_manifest = None
         if "manifest.json" in names:
-            with zf.open("manifest.json") as mf:
+            with archive.open("manifest.json") as manifest_file:
                 try:
-                    xapk_manifest = json.loads(mf.read())
-                    pkg = xapk_manifest.get("package_name", "")
-                    ver = xapk_manifest.get("version_name", "")
-                    print(f"    包名: {pkg}")
-                    print(f"    版本: {ver}")
+                    xapk_manifest = json.loads(manifest_file.read())
+                    print(f"    Package name: {xapk_manifest.get('package_name', '')}")
+                    print(f"    Version: {xapk_manifest.get('version_name', '')}")
                 except json.JSONDecodeError:
-                    pass
+                    xapk_manifest = None
 
-        # 查找 base APK: 优先 "{package_name}.apk", 然后 "base.apk", 再找任意 .apk
-        apk_files = [n for n in names if n.endswith(".apk")]
-        print(f"    包含 APK: {apk_files}")
+        apk_files = [name for name in names if name.endswith(".apk")]
+        print(f"    APK entries: {apk_files}")
 
         target_apk = None
         if xapk_manifest:
-            pkg_apk = xapk_manifest.get("package_name", "") + ".apk"
-            if pkg_apk in apk_files:
-                target_apk = pkg_apk
+            package_apk = f"{xapk_manifest.get('package_name', '')}.apk"
+            if package_apk in apk_files:
+                target_apk = package_apk
         if not target_apk and "base.apk" in apk_files:
             target_apk = "base.apk"
-        if not target_apk:
-            # 按大小选最大的 (通常是 base)
-            sizes = [(n, zf.getinfo(n).file_size) for n in apk_files]
-            sizes.sort(key=lambda x: x[1], reverse=True)
-            if sizes:
-                target_apk = sizes[0][0]
+        if not target_apk and apk_files:
+            target_apk = max(apk_files, key=lambda item: archive.getinfo(item).file_size)
 
         if not target_apk:
-            print("错误: XAPK 中未找到 APK 文件")
+            print("Error: no APK payload was found in the XAPK package.")
             return None
 
-        print(f"    提取: {target_apk}")
-        zf.extract(target_apk, extract_dir)
+        print(f"    Extracting: {target_apk}")
+        archive.extract(target_apk, extract_dir)
         extracted_path = extract_dir / target_apk
-        print(f"    提取完成: {extracted_path}")
+        print(f"    Extracted to: {extracted_path}")
         return extracted_path
 
 
-# ============================================================
-# Manifest 解析 (使用 androguard, 纯 Python, 跨平台)
-# ============================================================
+def parse_apk(apk_path, reports_dir):
+    """Parse the APK manifest and export a copy of the XML."""
 
-def parse_apk(apk_path, output_dir):
-    """使用 androguard 解析 APK, 提取 Manifest 信息"""
+    ensure_analysis_dependencies()
+
     try:
         apk = APK(str(apk_path))
-    except Exception as e:
-        print(f"错误: 无法解析 APK: {e}")
-        return None, None
+    except Exception as exc:
+        print(f"Error: could not parse APK: {exc}")
+        return None, None, None
 
-    # 导出 Manifest XML 文本 (供后续文本匹配和存档)
     xml_root = apk.get_android_manifest_xml()
     manifest_xml = etree.tostring(xml_root, pretty_print=True, encoding="unicode")
-    manifest_file = output_dir / f"{apk_path.stem}_manifest.xml"
+    manifest_file = reports_dir / f"{apk_path.stem}_manifest.xml"
     manifest_file.write_text(manifest_xml, encoding="utf-8")
-    print(f"    Manifest 已导出: {manifest_file.name}")
+    print(f"    Manifest exported: {manifest_file}")
 
-    # 提取结构化信息
-    ns = "http://schemas.android.com/apk/res/android"
+    android_ns = "http://schemas.android.com/apk/res/android"
     info = {
         "package": apk.get_package() or "",
         "version_code": apk.get_androidversion_code() or "",
         "version_name": apk.get_androidversion_name() or "",
         "min_sdk": apk.get_min_sdk_version() or "",
         "target_sdk": apk.get_target_sdk_version() or "",
-        "compile_sdk": xml_root.get(f"{{{ns}}}compileSdkVersion",
-                                     xml_root.get("compileSdkVersion", "")),
+        "compile_sdk": xml_root.get(
+            f"{{{android_ns}}}compileSdkVersion",
+            xml_root.get("compileSdkVersion", ""),
+        ),
         "application_name": "",
         "permissions": apk.get_permissions() or [],
         "activities": apk.get_activities() or [],
@@ -179,144 +147,135 @@ def parse_apk(apk_path, output_dir):
         "receivers": apk.get_receivers() or [],
         "providers": apk.get_providers() or [],
         "meta_data": [],
-        "intent_filters": [],
     }
 
-    # Application class name
-    app_el = xml_root.find("application")
-    if app_el is not None:
-        info["application_name"] = app_el.get(f"{{{ns}}}name", "")
+    app_element = xml_root.find("application")
+    if app_element is not None:
+        info["application_name"] = app_element.get(f"{{{android_ns}}}name", "")
 
-    # 提取 meta-data (lxml API)
-    for md in xml_root.iter("meta-data"):
-        name = md.get(f"{{{ns}}}name", "")
-        value = md.get(f"{{{ns}}}value", "") or md.get(f"{{{ns}}}resource", "")
+    for meta_data in xml_root.iter("meta-data"):
+        name = meta_data.get(f"{{{android_ns}}}name", "")
+        value = meta_data.get(f"{{{android_ns}}}value", "") or meta_data.get(
+            f"{{{android_ns}}}resource", ""
+        )
         if name:
             info["meta_data"].append({"name": name, "value": value})
 
-    return info, manifest_xml
+    return info, manifest_xml, manifest_file
 
-
-# ============================================================
-# 策略分析
-# ============================================================
 
 def analyze_strategies(manifest_text, info):
-    """分析各种保活/推送/权限策略"""
+    """Detect background, messaging, and scheduling strategies."""
+
     strategies = {}
 
-    # ----- 1. 账号保活 (SyncAdapter) -----
     has_sync = "android.content.SyncAdapter" in manifest_text
-    sync_services = [s for s in info["services"] if "sync" in s.lower()]
+    sync_services = [service for service in info["services"] if "sync" in service.lower()]
     strategies["sync_adapter"] = {
-        "name": "账号保活 (SyncAdapter)",
+        "name": "Sync adapter",
         "detected": has_sync,
         "details": sync_services if has_sync else [],
-        "description": "通过 SyncAdapter 注册账号同步服务，利用系统同步机制实现后台保活",
+        "description": "Uses Android sync adapters to keep background jobs active.",
     }
 
-    # ----- 2. 联系人保活 (ContactDirectory) -----
-    has_contact = any(
-        md["name"] == "android.content.ContactDirectory" for md in info["meta_data"]
+    has_contact_directory = any(
+        meta_data["name"] == "android.content.ContactDirectory" for meta_data in info["meta_data"]
     )
     strategies["contact_directory"] = {
-        "name": "联系人保活 (ContactDirectory)",
-        "detected": has_contact,
+        "name": "Contact directory provider",
+        "detected": has_contact_directory,
         "details": [],
-        "description": "通过 ContactDirectory 注册联系人提供者，利用通讯录访问实现后台保活",
+        "description": "Registers a contact directory provider that can keep the app visible to system lookups.",
     }
 
-    # ----- 3. 开机启动 (BOOT_COMPLETED) -----
-    has_boot_perm = "android.permission.RECEIVE_BOOT_COMPLETED" in info["permissions"]
-    boot_receivers = []
-    # 查找监听 BOOT_COMPLETED 的 receiver
-    for m in re.finditer(
-        r'E: receiver.*?android:name\([^)]+\)="([^"]+)".*?'
-        r'(?=E: receiver|E: service|E: activity|E: provider|\Z)',
-        manifest_text, re.DOTALL,
-    ):
-        block = m.group(0)
-        if "BOOT_COMPLETED" in block:
-            boot_receivers.append(m.group(1))
+    has_boot_permission = "android.permission.RECEIVE_BOOT_COMPLETED" in info["permissions"]
+    boot_receivers = [receiver for receiver in info["receivers"] if "boot" in receiver.lower()]
     strategies["boot_completed"] = {
-        "name": "开机启动 (BOOT_COMPLETED)",
-        "detected": has_boot_perm,
+        "name": "Boot completed receiver",
+        "detected": has_boot_permission,
         "details": boot_receivers,
-        "description": "监听 BOOT_COMPLETED 广播, 设备开机后自动启动",
+        "description": "Starts work again after device reboot.",
     }
 
-    # ----- 4. FCM 推送 -----
-    has_fcm = any("FirebaseMessaging" in s for s in info["services"])
-    has_fcm = has_fcm or any("FirebaseMessagingRegistrar" in md["name"] for md in info["meta_data"])
+    has_fcm = any("FirebaseMessaging" in service for service in info["services"])
+    has_fcm = has_fcm or any(
+        "FirebaseMessagingRegistrar" in meta_data["name"] for meta_data in info["meta_data"]
+    )
     has_fcm = has_fcm or "com.google.firebase.messaging" in manifest_text
-    fcm_components = [s for s in info["services"] if "firebase" in s.lower() and "messag" in s.lower()]
-    # Firebase Analytics 不算 FCM
-    has_firebase_analytics = any("firebase" in s.lower() and "analytics" in s.lower() for s in info["services"])
-    has_firebase_any = any("firebase" in s.lower() for s in info["services"]) or \
-                       any("firebase" in p.lower() for p in info["providers"])
+    fcm_components = [
+        service for service in info["services"] if "firebase" in service.lower() and "messag" in service.lower()
+    ]
+    has_firebase_any = any("firebase" in service.lower() for service in info["services"]) or any(
+        "firebase" in provider.lower() for provider in info["providers"]
+    )
     strategies["fcm"] = {
-        "name": "FCM 推送 (Firebase Cloud Messaging)",
+        "name": "Firebase Cloud Messaging",
         "detected": has_fcm,
         "details": fcm_components,
-        "has_firebase_analytics": has_firebase_analytics,
         "has_firebase_any": has_firebase_any,
-        "description": "通过 Google FCM 实现服务器主动推送, 是最主流的推送保活方案",
+        "description": "Uses FCM for server-driven push delivery.",
     }
 
-    # ----- 5. Full Screen Intent -----
-    has_fsi = "android.permission.USE_FULL_SCREEN_INTENT" in info["permissions"]
+    has_full_screen_intent = "android.permission.USE_FULL_SCREEN_INTENT" in info["permissions"]
     strategies["full_screen_intent"] = {
-        "name": "全屏 Intent (USE_FULL_SCREEN_INTENT)",
-        "detected": has_fsi,
+        "name": "Full-screen intent",
+        "detected": has_full_screen_intent,
         "details": [],
-        "description": "允许在锁屏上显示全屏通知 (类似闹钟/来电), Android 14+ 需运行时授权",
+        "description": "Can surface urgent full-screen notifications such as calls or alarms.",
     }
 
-    # ----- 6. 悬浮窗 (SYSTEM_ALERT_WINDOW) -----
     has_overlay = "android.permission.SYSTEM_ALERT_WINDOW" in info["permissions"]
     strategies["system_alert_window"] = {
-        "name": "悬浮窗 (SYSTEM_ALERT_WINDOW)",
+        "name": "System alert window",
         "detected": has_overlay,
         "details": [],
-        "description": "允许在其他应用上方绘制悬浮窗口, 可用于悬浮工具/广告展示",
+        "description": "Can draw on top of other apps with overlay windows.",
     }
 
-    # ----- 7. 前台服务 -----
-    has_fg = "android.permission.FOREGROUND_SERVICE" in info["permissions"]
-    fg_types = [p for p in info["permissions"] if p.startswith("android.permission.FOREGROUND_SERVICE_")]
+    has_foreground_service = "android.permission.FOREGROUND_SERVICE" in info["permissions"]
+    foreground_permissions = [
+        permission
+        for permission in info["permissions"]
+        if permission.startswith("android.permission.FOREGROUND_SERVICE_")
+    ]
     strategies["foreground_service"] = {
-        "name": "前台服务 (FOREGROUND_SERVICE)",
-        "detected": has_fg,
-        "details": fg_types,
-        "description": "通过前台服务保持进程存活, 需在通知栏显示持续通知",
+        "name": "Foreground service",
+        "detected": has_foreground_service,
+        "details": foreground_permissions,
+        "description": "Keeps long-running work alive with a visible notification.",
     }
 
-    # ----- 8. 精确闹钟 -----
-    has_exact = "android.permission.SCHEDULE_EXACT_ALARM" in info["permissions"] or \
-                "android.permission.USE_EXACT_ALARM" in info["permissions"]
-    alarm_perms = [p for p in info["permissions"] if "EXACT_ALARM" in p or "SET_ALARM" in p]
+    has_exact_alarm = (
+        "android.permission.SCHEDULE_EXACT_ALARM" in info["permissions"]
+        or "android.permission.USE_EXACT_ALARM" in info["permissions"]
+    )
+    exact_alarm_permissions = [
+        permission
+        for permission in info["permissions"]
+        if "EXACT_ALARM" in permission or "SET_ALARM" in permission
+    ]
     strategies["exact_alarm"] = {
-        "name": "精确闹钟 (EXACT_ALARM)",
-        "detected": has_exact,
-        "details": alarm_perms,
-        "description": "使用精确定时唤醒, 可实现定时任务/提醒, Android 12+ 需授权",
+        "name": "Exact alarm",
+        "detected": has_exact_alarm,
+        "details": exact_alarm_permissions,
+        "description": "Schedules exact wake-ups for reminders or timing-sensitive jobs.",
     }
 
-    # ----- 9. WorkManager / JobScheduler -----
-    has_workmanager = any("androidx.work" in s for s in info["services"])
-    wm_components = [s for s in info["services"] if "androidx.work" in s]
+    has_workmanager = any("androidx.work" in service for service in info["services"])
+    workmanager_components = [service for service in info["services"] if "androidx.work" in service]
     strategies["workmanager"] = {
         "name": "WorkManager / JobScheduler",
         "detected": has_workmanager,
-        "details": wm_components,
-        "description": "通过 WorkManager 调度后台任务, 系统级任务管理, 可延迟/重试执行",
+        "details": workmanager_components,
+        "description": "Uses system-managed background scheduling and retries.",
     }
 
     return strategies
 
 
 def detect_ad_sdks(info, manifest_text):
-    """检测集成的广告 SDK"""
+    """Detect common advertising SDKs from manifest signals."""
+
     known_sdks = {
         "Google AdMob": ["com.google.android.gms.ads"],
         "AppLovin / MAX": ["com.applovin"],
@@ -349,25 +308,26 @@ def detect_ad_sdks(info, manifest_text):
     )
 
     for sdk_name, identifiers in known_sdks.items():
-        for ident in identifiers:
-            if ident.lower() in manifest_text.lower() or ident.lower() in all_components.lower():
-                # 提取 AdMob App ID
-                if sdk_name == "Google AdMob":
-                    for md in info["meta_data"]:
-                        if md["name"] == "com.google.android.gms.ads.APPLICATION_ID":
-                            detected[sdk_name] = md["value"]
-                            break
-                    else:
-                        detected[sdk_name] = ""
-                else:
-                    detected[sdk_name] = ""
-                break
+        for identifier in identifiers:
+            if identifier.lower() not in manifest_text.lower() and identifier.lower() not in all_components.lower():
+                continue
+            if sdk_name == "Google AdMob":
+                app_id = ""
+                for meta_data in info["meta_data"]:
+                    if meta_data["name"] == "com.google.android.gms.ads.APPLICATION_ID":
+                        app_id = meta_data["value"]
+                        break
+                detected[sdk_name] = app_id
+            else:
+                detected[sdk_name] = ""
+            break
 
     return detected
 
 
 def detect_third_party_services(info, manifest_text):
-    """检测第三方服务和 SDK"""
+    """Detect common non-advertising third-party services."""
+
     known_services = {
         "Firebase Analytics": ["com.google.firebase.analytics", "AppMeasurement"],
         "Firebase Installations": ["FirebaseInstallationsRegistrar"],
@@ -395,293 +355,317 @@ def detect_third_party_services(info, manifest_text):
     }
 
     detected = []
-    for name, identifiers in known_services.items():
-        for ident in identifiers:
-            if ident.lower() in manifest_text.lower():
-                detected.append(name)
-                break
-
+    lowered_manifest = manifest_text.lower()
+    for service_name, identifiers in known_services.items():
+        if any(identifier.lower() in lowered_manifest for identifier in identifiers):
+            detected.append(service_name)
     return detected
 
 
-# ============================================================
-# 报告生成
-# ============================================================
+def generate_report(info, strategies, ad_sdks, third_party, output_path):
+    """Generate a Markdown report from manifest analysis results."""
 
-def generate_report(info, strategies, ad_sdks, third_party, manifest_text, output_path):
-    """生成 Markdown 格式分析报告"""
+    sensitive_permissions = {
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "READ_CONTACTS",
+        "WRITE_CONTACTS",
+        "READ_PHONE_STATE",
+        "CALL_PHONE",
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_SMS",
+        "SEND_SMS",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR",
+        "BODY_SENSORS",
+    }
 
-    lines = []
-    lines.append(f"# Android APP 分析报告")
-    lines.append(f"")
-    lines.append(f"**生成时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"")
-    lines.append(f"---")
-    lines.append(f"")
+    lines = [
+        "# Android App Analysis Report",
+        "",
+        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "---",
+        "",
+        "## 1. Basic Information",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| **Package** | `{info['package']}` |",
+        f"| **Version** | {info['version_name']} (versionCode: {info['version_code']}) |",
+        f"| **compileSdk** | {info['compile_sdk']} |",
+        f"| **targetSdk** | {info['target_sdk']} |",
+        f"| **minSdk** | {info['min_sdk']} |",
+        f"| **Application** | `{info['application_name']}` |",
+        "",
+        "## 2. Background, Messaging, and Scheduling Signals",
+        "",
+        "| Strategy | Status | Details |",
+        "|---|---|---|",
+    ]
 
-    # 基本信息
-    lines.append(f"## 1. 基本信息")
-    lines.append(f"")
-    lines.append(f"| 项目 | 值 |")
-    lines.append(f"|---|---|")
-    lines.append(f"| **包名** | `{info['package']}` |")
-    lines.append(f"| **版本号** | {info['version_name']} (versionCode: {info['version_code']}) |")
-    lines.append(f"| **compileSdk** | {info['compile_sdk']} |")
-    lines.append(f"| **targetSdk** | {info['target_sdk']} |")
-    lines.append(f"| **minSdk** | {info['min_sdk']} |")
-    lines.append(f"| **Application** | `{info['application_name']}` |")
-    lines.append(f"")
-
-    # 策略分析
-    lines.append(f"## 2. 保活/推送/权限策略分析")
-    lines.append(f"")
-    lines.append(f"| 策略 | 状态 | 详情 |")
-    lines.append(f"|---|---|---|")
-
-    for key, s in strategies.items():
-        status = "**已检测到**" if s["detected"] else "未发现"
+    for key, strategy in strategies.items():
+        status = "**Detected**" if strategy["detected"] else "Not found"
         details = ""
-        if s["details"]:
-            if isinstance(s["details"], list) and len(s["details"]) <= 3:
-                details = ", ".join(f"`{d}`" for d in s["details"])
-            elif isinstance(s["details"], list):
-                details = f"{len(s['details'])} 个组件"
-        if key == "fcm" and not s["detected"]:
-            if s.get("has_firebase_any"):
-                details = "仅 Firebase Analytics, 无 FCM"
-        lines.append(f"| {s['name']} | {status} | {details} |")
+        if strategy["details"]:
+            if len(strategy["details"]) <= 3:
+                details = ", ".join(f"`{detail}`" for detail in strategy["details"])
+            else:
+                details = f"{len(strategy['details'])} components"
+        if key == "fcm" and not strategy["detected"] and strategy.get("has_firebase_any"):
+            details = "Firebase components found, but no FCM signal"
+        lines.append(f"| {strategy['name']} | {status} | {details} |")
 
-    lines.append(f"")
+    lines.extend(["", "### Detected Strategy Details", ""])
+    for strategy in strategies.values():
+        if not strategy["detected"]:
+            continue
+        lines.append(f"#### {strategy['name']}")
+        lines.append("")
+        lines.append(f"- **Description:** {strategy['description']}")
+        if strategy["details"]:
+            lines.append("- **Related components:**")
+            for detail in strategy["details"]:
+                lines.append(f"  - `{detail}`")
+        lines.append("")
 
-    # 策略详细说明
-    lines.append(f"### 策略详情")
-    lines.append(f"")
-    for key, s in strategies.items():
-        if s["detected"]:
-            lines.append(f"#### {s['name']}")
-            lines.append(f"")
-            lines.append(f"- **说明:** {s['description']}")
-            if s["details"]:
-                lines.append(f"- **相关组件:**")
-                for d in s["details"]:
-                    lines.append(f"  - `{d}`")
-            lines.append(f"")
-
-    # 广告 SDK
-    lines.append(f"## 3. 广告 SDK")
-    lines.append(f"")
+    lines.append("## 3. Advertising SDKs")
+    lines.append("")
     if ad_sdks:
-        lines.append(f"共检测到 **{len(ad_sdks)}** 个广告 SDK:")
-        lines.append(f"")
-        lines.append(f"| SDK | 备注 |")
-        lines.append(f"|---|---|")
+        lines.append(f"Detected **{len(ad_sdks)}** advertising SDKs:")
+        lines.append("")
+        lines.append("| SDK | Notes |")
+        lines.append("|---|---|")
         for sdk_name, extra in sorted(ad_sdks.items()):
             note = f"App ID: `{extra}`" if extra else ""
             lines.append(f"| {sdk_name} | {note} |")
     else:
-        lines.append(f"未检测到广告 SDK。")
-    lines.append(f"")
+        lines.append("No common advertising SDKs were detected.")
+    lines.append("")
 
-    # 第三方服务
-    lines.append(f"## 4. 第三方服务/SDK")
-    lines.append(f"")
+    lines.append("## 4. Third-Party Services")
+    lines.append("")
     if third_party:
-        for svc in sorted(third_party):
-            lines.append(f"- {svc}")
+        for service_name in sorted(third_party):
+            lines.append(f"- {service_name}")
     else:
-        lines.append(f"未检测到常见第三方服务。")
-    lines.append(f"")
+        lines.append("No common third-party services were detected.")
+    lines.append("")
 
-    # 权限列表
-    lines.append(f"## 5. 完整权限列表")
-    lines.append(f"")
-    lines.append(f"共 **{len(info['permissions'])}** 个权限:")
-    lines.append(f"")
-    # 分类: 系统权限 vs 自定义权限
-    system_perms = [p for p in info["permissions"] if p.startswith("android.permission.")]
-    custom_perms = [p for p in info["permissions"] if not p.startswith("android.permission.")]
+    lines.append("## 5. Permissions")
+    lines.append("")
+    lines.append(f"Detected **{len(info['permissions'])}** permissions:")
+    lines.append("")
 
-    if system_perms:
-        lines.append(f"### 系统权限 ({len(system_perms)})")
-        lines.append(f"")
-        for p in sorted(system_perms):
-            # 标记敏感权限
-            sensitive = ""
-            dangerous = [
-                "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION",
-                "READ_CONTACTS", "WRITE_CONTACTS",
-                "READ_PHONE_STATE", "CALL_PHONE",
-                "CAMERA", "RECORD_AUDIO",
-                "READ_SMS", "SEND_SMS",
-                "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE",
-                "READ_CALENDAR", "WRITE_CALENDAR",
-                "BODY_SENSORS",
-            ]
-            perm_short = p.replace("android.permission.", "")
-            if perm_short in dangerous:
-                sensitive = " ⚠️ 敏感"
-            lines.append(f"- `{p}`{sensitive}")
-        lines.append(f"")
+    system_permissions = [permission for permission in info["permissions"] if permission.startswith("android.permission.")]
+    custom_permissions = [permission for permission in info["permissions"] if not permission.startswith("android.permission.")]
 
-    if custom_perms:
-        lines.append(f"### 自定义/第三方权限 ({len(custom_perms)})")
-        lines.append(f"")
-        for p in sorted(custom_perms):
-            lines.append(f"- `{p}`")
-        lines.append(f"")
+    if system_permissions:
+        lines.append(f"### System Permissions ({len(system_permissions)})")
+        lines.append("")
+        for permission in sorted(system_permissions):
+            short_name = permission.replace("android.permission.", "")
+            suffix = " [sensitive]" if short_name in sensitive_permissions else ""
+            lines.append(f"- `{permission}`{suffix}")
+        lines.append("")
 
-    # 组件统计
-    lines.append(f"## 6. 组件统计")
-    lines.append(f"")
-    lines.append(f"| 类型 | 数量 |")
-    lines.append(f"|---|---|")
-    lines.append(f"| Activity | {len(info['activities'])} |")
-    lines.append(f"| Service | {len(info['services'])} |")
-    lines.append(f"| Receiver | {len(info['receivers'])} |")
-    lines.append(f"| Provider | {len(info['providers'])} |")
-    lines.append(f"")
+    if custom_permissions:
+        lines.append(f"### Custom or Third-Party Permissions ({len(custom_permissions)})")
+        lines.append("")
+        for permission in sorted(custom_permissions):
+            lines.append(f"- `{permission}`")
+        lines.append("")
 
-    # 写入文件
+    lines.extend(
+        [
+            "## 6. Component Counts",
+            "",
+            "| Component | Count |",
+            "|---|---|",
+            f"| Activity | {len(info['activities'])} |",
+            f"| Service | {len(info['services'])} |",
+            f"| Receiver | {len(info['receivers'])} |",
+            f"| Provider | {len(info['providers'])} |",
+            "",
+        ]
+    )
+
     report_content = "\n".join(lines)
     output_path.write_text(report_content, encoding="utf-8")
     return report_content
 
 
-# ============================================================
-# 主流程
-# ============================================================
+def write_run_metadata(workspace, source_target, info, apk_path, report_path, manifest_path):
+    """Persist a small metadata file for later cleanup or inspection."""
 
-def analyze_apk(apk_path, output_dir):
-    """对单个 APK 执行完整分析"""
+    metadata = {
+        "source_target": source_target,
+        "workspace": str(workspace.package_dir),
+        "package": info.get("package", ""),
+        "version_name": info.get("version_name", ""),
+        "version_code": info.get("version_code", ""),
+        "apk_path": str(apk_path),
+        "report_path": str(report_path),
+        "manifest_path": str(manifest_path),
+        "generated_at": datetime.now().isoformat(),
+    }
+    metadata_path = workspace.package_dir / "run.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return metadata_path
+
+
+def analyze_apk(apk_path, workspace, source_target):
+    """Run the full manifest analysis workflow for a single APK."""
+
     print(f"\n{'=' * 60}")
-    print(f"阶段 2: 解析 Manifest (androguard)")
+    print("Phase 2: Parse manifest")
     print(f"{'=' * 60}")
 
-    info, manifest_text = parse_apk(apk_path, output_dir)
+    info, manifest_text, manifest_file = parse_apk(apk_path, workspace.reports_dir)
     if not info:
         return False
 
     print(f"\n{'=' * 60}")
-    print(f"阶段 3: 分析 Manifest")
+    print("Phase 3: Analyze manifest")
     print(f"{'=' * 60}")
+    print(f"    Package: {info['package']}")
+    print(f"    Version: {info['version_name']} ({info['version_code']})")
+    print(
+        f"    SDK: min={info['min_sdk']} target={info['target_sdk']} compile={info['compile_sdk']}"
+    )
+    print(f"    Permissions: {len(info['permissions'])}")
+    print(
+        "    Components: "
+        f"{len(info['activities'])} Activity, "
+        f"{len(info['services'])} Service, "
+        f"{len(info['receivers'])} Receiver, "
+        f"{len(info['providers'])} Provider"
+    )
 
-    print(f"    包名: {info['package']}")
-    print(f"    版本: {info['version_name']} ({info['version_code']})")
-    print(f"    SDK: min={info['min_sdk']} target={info['target_sdk']} compile={info['compile_sdk']}")
-    print(f"    权限: {len(info['permissions'])} 个")
-    print(f"    组件: {len(info['activities'])} Activity, {len(info['services'])} Service, "
-          f"{len(info['receivers'])} Receiver, {len(info['providers'])} Provider")
-
-    # 策略分析
     strategies = analyze_strategies(manifest_text, info)
-    detected_count = sum(1 for s in strategies.values() if s["detected"])
-    print(f"\n    检测到的策略: {detected_count}/{len(strategies)}")
-    for key, s in strategies.items():
-        marker = "[+]" if s["detected"] else "[-]"
-        print(f"      {marker} {s['name']}")
+    detected_count = sum(1 for strategy in strategies.values() if strategy["detected"])
+    print(f"\n    Detected strategies: {detected_count}/{len(strategies)}")
+    for strategy in strategies.values():
+        marker = "[+]" if strategy["detected"] else "[-]"
+        print(f"      {marker} {strategy['name']}")
 
-    # 广告 SDK
     ad_sdks = detect_ad_sdks(info, manifest_text)
-    print(f"\n    广告 SDK: {len(ad_sdks)} 个")
-    for sdk in sorted(ad_sdks.keys()):
-        print(f"      [AD] {sdk}")
+    print(f"\n    Advertising SDKs: {len(ad_sdks)}")
+    for sdk_name in sorted(ad_sdks):
+        print(f"      [AD] {sdk_name}")
 
-    # 第三方服务
     third_party = detect_third_party_services(info, manifest_text)
-    print(f"\n    第三方服务: {len(third_party)} 个")
+    print(f"\n    Third-party services: {len(third_party)}")
 
-    # 生成报告
     print(f"\n{'=' * 60}")
-    print(f"阶段 4: 生成报告")
+    print("Phase 4: Generate report")
     print(f"{'=' * 60}")
 
     report_name = f"{info['package']}_analysis.md" if info["package"] else "analysis_report.md"
-    report_path = output_dir / report_name
-    manifest_file = output_dir / f"{apk_path.stem}_manifest.xml"
-    report_content = generate_report(info, strategies, ad_sdks, third_party, manifest_text, report_path)
-    print(f"    报告已保存: {report_path}")
+    report_path = workspace.reports_dir / report_name
+    generate_report(info, strategies, ad_sdks, third_party, report_path)
+    metadata_path = write_run_metadata(
+        workspace=workspace,
+        source_target=source_target,
+        info=info,
+        apk_path=apk_path,
+        report_path=report_path,
+        manifest_path=manifest_file,
+    )
 
-    # 在终端输出报告摘要
+    print(f"    Report saved: {report_path}")
+    print(f"    Run metadata: {metadata_path}")
     print(f"\n{'=' * 60}")
-    print(f"分析完成")
+    print("Analysis complete")
     print(f"{'=' * 60}")
-    print(f"  APK:    {apk_path.name}")
-    print(f"  包名:   {info['package']}")
-    print(f"  版本:   {info['version_name']}")
-    print(f"  报告:   {report_path}")
+    print(f"  Workspace: {workspace.package_dir}")
+    print(f"  APK: {apk_path}")
+    print(f"  Report: {report_path}")
     print(f"  Manifest: {manifest_file}")
 
     return True
 
 
+def resolve_local_target(target, workspace_root):
+    """Resolve a local APK/XAPK target path and pick a workspace name for it."""
+
+    target_path = Path(target)
+    for candidate in (target_path, workspace_root / target, SCRIPT_DIR / target):
+        if candidate.exists() and candidate.suffix.lower() in (".apk", ".xapk"):
+            return candidate.resolve()
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Android APP 分析工具 - 下载、解压、Manifest分析、策略检测",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python3 android_analyzer.py com.whatsapp                    # 下载并分析
-  python3 android_analyzer.py com.example.app --skip-download # 分析当前目录已有 APK
-  python3 android_analyzer.py ./myapp.apk                     # 直接分析本地文件
-  python3 android_analyzer.py com.example.app -o D:\\reports   # 指定输出目录
-        """,
+        description="Analyze Android APK/XAPK packages with a managed workspace cache.",
     )
-    parser.add_argument("target", help="应用包名 (如 com.whatsapp) 或本地 APK/XAPK 文件路径")
-    parser.add_argument("--output", "-o", default=".", help="输出目录 (默认当前目录)")
-    parser.add_argument("--skip-download", "-s", action="store_true",
-                        help="跳过下载, 直接分析当前目录中已有的 APK")
+    parser.add_argument(
+        "target",
+        help="Application package name (for example com.whatsapp) or a local APK/XAPK path",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Workspace root directory (default: .cache/android-app-analyzer under the repository)",
+    )
+    parser.add_argument(
+        "--skip-download",
+        "-s",
+        action="store_true",
+        help="Skip network download and reuse an artifact already present in the managed downloads directory",
+    )
     args = parser.parse_args()
 
-    output_dir = Path(args.output).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace_root = resolve_workspace_root(
+            repo_root=SCRIPT_DIR,
+            output_root=Path(args.output) if args.output else None,
+        )
+        warning = ensure_workspace_capacity(workspace_root)
+        if warning:
+            print(f"Warning: {warning}")
 
-    target = args.target
-    apk_path = None
+        resolved_local_path = resolve_local_target(args.target, workspace_root)
+        workspace_name = resolved_local_path.stem if resolved_local_path else args.target
+        workspace = create_package_workspace(workspace_root, workspace_name)
+        print(f"Workspace: {workspace.package_dir}")
 
-    # 判断输入是文件路径还是包名
-    target_path = Path(target)
-    # 尝试多个位置查找文件: 原始路径、输出目录、脚本目录
-    resolved_path = None
-    for candidate in [target_path, output_dir / target, SCRIPT_DIR / target]:
-        if candidate.exists() and candidate.suffix in (".apk", ".xapk"):
-            resolved_path = candidate.resolve()
-            break
-
-    if resolved_path:
-        # 直接分析本地文件
-        apk_path = resolved_path
-        print(f"分析本地文件: {apk_path}")
-    elif args.skip_download:
-        # 在当前目录查找匹配的 APK/XAPK
-        package_name = target
-        candidates = list(output_dir.glob(f"*{package_name}*.*pk")) + \
-                     list(output_dir.glob(f"*{package_name}*.*apk"))
-        if candidates:
-            candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        if resolved_local_path:
+            apk_path = resolved_local_path
+            print(f"Analyzing local file: {apk_path}")
+        elif args.skip_download:
+            candidates = list(workspace.downloads_dir.glob("*.apk")) + list(
+                workspace.downloads_dir.glob("*.xapk")
+            )
+            if not candidates:
+                print("Error: no cached APK/XAPK file was found in the managed downloads directory.")
+                sys.exit(1)
+            candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
             apk_path = candidates[0]
-            print(f"找到已有文件: {apk_path.name}")
+            print(f"Reusing cached artifact: {apk_path}")
         else:
-            print(f"错误: 未找到包含 '{package_name}' 的 APK/XAPK 文件")
-            sys.exit(1)
-    else:
-        # 下载
-        package_name = target
-        downloaded = download_apk(package_name, output_dir)
-        if not downloaded:
-            sys.exit(1)
-        apk_path = downloaded
+            apk_path = download_apk(args.target, workspace.downloads_dir)
 
-    # 如果是 XAPK, 先提取 base APK
-    if apk_path.suffix.lower() == ".xapk":
-        extracted = extract_apk_from_xapk(apk_path, output_dir)
-        if not extracted:
-            print("错误: 无法从 XAPK 中提取 APK")
-            sys.exit(1)
-        apk_path = extracted
+        if apk_path.suffix.lower() == ".xapk":
+            extracted = extract_apk_from_xapk(apk_path, workspace.extracted_dir)
+            if not extracted:
+                print("Error: could not extract a base APK from the XAPK package.")
+                sys.exit(1)
+            apk_path = extracted
 
-    # 执行分析
-    success = analyze_apk(apk_path, output_dir)
-    if not success:
+        success = analyze_apk(apk_path, workspace, source_target=args.target)
+        if not success:
+            sys.exit(1)
+    except DependencyBootstrapError as exc:
+        print(exc)
+        sys.exit(1)
+    except WorkspaceLimitError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
 

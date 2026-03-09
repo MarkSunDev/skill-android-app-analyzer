@@ -75,7 +75,7 @@ class DependencyBootstrapTests(unittest.TestCase):
                 printer=lambda *_args: None,
             )
 
-        self.assertIn("自动安装 Python 依赖失败", str(context.exception))
+        self.assertIn("Automatic Python dependency installation failed", str(context.exception))
         self.assertIn("pip install androguard", str(context.exception))
 
 

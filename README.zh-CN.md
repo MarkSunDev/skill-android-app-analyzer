@@ -6,11 +6,12 @@
 
 ## 功能特性
 
-- 按包名从 apkcombo 下载最新 APK 或 XAPK
+- 按包名从 APKCombo 下载最新 APK 或 XAPK
+- 使用受控缓存工作空间管理重复运行
 - 自动从 XAPK 中提取 base APK
 - 使用 `androguard` 解析 `AndroidManifest.xml`
 - 检测权限、后台保活策略、推送集成、广告 SDK 和常见第三方服务
-- 生成便于后续审阅的 Markdown 报告
+- 生成 Markdown 报告和运行元数据，便于后续审阅
 
 ## 项目定位
 
@@ -44,7 +45,29 @@ npx skills add MarkSunDev/skill-android-app-analyzer -g -y
 python3 -m pip install -r requirements.txt
 ```
 
-你也可以直接运行脚本。若缺少 Python 依赖，脚本会先尝试自动安装；若自动安装失败，会输出清晰的手动安装命令。
+脚本也支持懒加载依赖。只有真正走到下载或分析路径时，才会尝试安装对应依赖；如果自动安装失败，会输出可直接执行的手动安装命令。
+
+## 受控工作空间
+
+分析器默认使用受控缓存工作空间：
+
+```text
+.cache/
+  android-app-analyzer/
+    com.example.app/
+      downloads/
+      extracted/
+      reports/
+      temp/
+      run.json
+```
+
+规则如下：
+
+- 当包级子目录数量大于 `5` 时：只告警，不阻断流程。
+- 当包级子目录数量大于 `20` 时：直接中断，要求先手动清理。
+
+当前版本不会自动删除旧目录，清理动作由用户显式执行。`SKILL.md`、Python 注释和 CLI 文案现在统一使用英文，避免 skill 运行时出现中英文混杂。
 
 ## 快速开始
 
@@ -57,16 +80,22 @@ python3 android_analyzer.py com.kjvbibleadio.dailyverse
 分析本地已有安装包：
 
 ```bash
-python3 android_analyzer.py path/to/app.apk --output reports
+python3 android_analyzer.py path/to/app.apk
 ```
 
 只下载，不分析：
 
 ```bash
-python3 apkcombo_download.py com.example.app --output downloads
+python3 apkcombo_download.py com.example.app
 ```
 
-跳过下载，直接分析输出目录里已有的安装包：
+指定自定义工作空间根目录：
+
+```bash
+python3 android_analyzer.py com.example.app --output D:\analysis-cache
+```
+
+跳过下载，复用工作空间里已有的缓存包：
 
 ```bash
 python3 android_analyzer.py com.example.app --skip-download
@@ -74,31 +103,37 @@ python3 android_analyzer.py com.example.app --skip-download
 
 ## 输出文件
 
-分析器可能生成以下文件：
+分析器可能生成以下内容：
 
-- `{package}_analysis.md`
-- `{apk_name}_manifest.xml`
-- 下载得到的 `.apk` 或 `.xapk`
-- XAPK 解压目录 `{name}_extracted/`
+- `downloads/*.apk` 或 `downloads/*.xapk`
+- `extracted/<xapk-name>/...`
+- `reports/{package}_analysis.md`
+- `reports/{apk_name}_manifest.xml`
+- `run.json`
+
+## APKCombo 下载链路说明
+
+下载器现在按 APKCombo 的当前页面结构工作：
+
+1. 打开解析后的应用页。
+2. 找到下载页。
+3. 从页面脚本中提取内部 `xid`。
+4. 向 `/<xid>/dl` 发起 POST。
+5. 解析返回的变体链接。
+6. 使用 `curl` 下载最终 APK/XAPK。
+
+如果 APKCombo 后续再次调整页面结构，优先检查和更新 `apkcombo_download.py`。
 
 ## 项目结构
 
 - `SKILL.md`: Codex skill 入口说明
 - `android_analyzer.py`: 主分析流程
 - `apkcombo_download.py`: APK/XAPK 下载器
+- `workspace_manager.py`: 共享工作空间管理逻辑
 - `dependency_bootstrap.py`: 共享依赖引导逻辑
 - `requirements.txt`: Python 依赖列表
-- `tests/`: 依赖引导逻辑的单元测试
+- `tests/`: 工作空间、下载解析和依赖引导的单元测试
 - `docs/plans/`: 设计与实现说明
-
-## 依赖处理策略
-
-这个项目采用双轨依赖策略：
-
-- 推荐方式：提前通过 `requirements.txt` 安装依赖
-- 兜底方式：脚本首次运行时尝试自动安装缺失依赖
-
-如果自动安装失败，脚本会打印出可直接执行的 `pip install` 命令。
 
 ## 安装到 Codex Skill 库（本地开发）
 
@@ -114,7 +149,7 @@ New-Item -ItemType SymbolicLink `
 
 这个仓库按 `skill-source` 形式发布 npm 包。npm 包的目标是分发 Codex skill 文件和 Python 实现，但它不是普通用户的主要安装入口。
 
-这个项目的推荐安装命令是：
+推荐安装命令：
 
 ```bash
 npx skills add MarkSunDev/skill-android-app-analyzer -g -y

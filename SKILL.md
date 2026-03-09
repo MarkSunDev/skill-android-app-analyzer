@@ -7,14 +7,33 @@ description: Use when analyzing an Android app by package name or local APK/XAPK
 
 ## Overview
 
-这个 skill 用于快速分析 Android 应用的 `AndroidManifest.xml`。它支持按包名自动下载 APK/XAPK，也支持直接分析本地安装包，并输出 Markdown 报告。
+This skill analyzes Android application packages and exports a structured Markdown report from `AndroidManifest.xml`. It supports both package-name downloads through APKCombo and direct analysis of local APK/XAPK files.
 
 ## When to Use
 
-- 需要快速了解一个 Android 应用的权限声明、组件数量和 SDK 版本
-- 需要判断应用是否使用了开机自启、前台服务、精确闹钟、FCM、WorkManager 等后台策略
-- 需要排查广告 SDK 或常见第三方服务集成
-- 手里只有包名或 APK/XAPK 文件，希望自动生成结构化分析结果
+- You need a fast view of an Android app's permissions, component counts, and SDK targets.
+- You want to inspect boot receivers, foreground services, exact alarms, FCM, or WorkManager usage.
+- You need a lightweight check for ad SDKs and common third-party services.
+- You only have a package name or an APK/XAPK file and want a reusable report.
+
+## Workspace Rules
+
+The skill always uses a managed cache workspace.
+
+- Default workspace root: `.cache/android-app-analyzer/`
+- Package workspace: `.cache/android-app-analyzer/<package-or-input-name>/`
+- Subdirectories:
+  - `downloads/`
+  - `extracted/`
+  - `reports/`
+  - `temp/`
+
+Cache guardrails:
+
+- More than 5 package workspaces: print a warning and continue.
+- More than 20 package workspaces: stop immediately and require manual cleanup before the next run.
+
+The tool will not auto-delete old cache folders in this version. Users must clear old workspaces manually when the cache grows too large.
 
 ## Quick Start
 
@@ -22,14 +41,14 @@ description: Use when analyzing an Android app by package name or local APK/XAPK
 python3 android_analyzer.py com.example.app
 python3 android_analyzer.py com.example.app --skip-download
 python3 android_analyzer.py path/to/app.apk
-python3 apkcombo_download.py com.example.app --output downloads
+python3 apkcombo_download.py com.example.app
 ```
 
 ## Dependency Handling
 
-- 脚本会在首次运行时尝试自动安装缺失的 Python 依赖
-- 自动安装失败时，会打印明确的手动安装命令
-- 也可以提前执行:
+- Python dependencies are loaded lazily and installed only when a code path actually needs them.
+- If automatic installation fails, the script prints an exact manual install command.
+- You can still install everything up front with:
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -37,14 +56,18 @@ python3 -m pip install -r requirements.txt
 
 ## Outputs
 
-- `{package}_analysis.md`
-- `{apk_name}_manifest.xml`
-- 下载的 `.apk` 或 `.xapk`
-- XAPK 解压目录 `{name}_extracted/`
+Each managed workspace may contain:
+
+- `downloads/*.apk` or `downloads/*.xapk`
+- `extracted/<xapk-name>/...`
+- `reports/*_manifest.xml`
+- `reports/*_analysis.md`
+- `run.json`
 
 ## Common Mistakes
 
-- `curl` 不可用: 下载器依赖系统 `curl`
-- `python` 指向 Python 2: 请显式使用 `python3` 或 Windows 的 `py -3`
-- 网络受限: 自动安装依赖和下载 APK 都需要联网
-- XAPK 缺少 base APK: 这通常是上游包格式异常，不是 skill 本身的问题
+- `curl` is missing: the downloader depends on the system `curl` binary.
+- `python` points to Python 2: use `python3` or `py -3` explicitly.
+- The workspace already has too many package folders: clear old cache folders before rerunning.
+- APKCombo changes its page structure again: the downloader may need another parser update.
+- An XAPK package does not include a usable base APK: that is usually an upstream package issue.

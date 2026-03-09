@@ -50,12 +50,12 @@ def _format_failure_message(
 ) -> str:
     details = (stderr or stdout).strip()
     lines = [
-        "自动安装 Python 依赖失败。",
-        f"请手动执行: {build_manual_install_command(missing)}",
-        "如果你使用虚拟环境，请先激活虚拟环境后再执行安装命令。",
+        "Automatic Python dependency installation failed.",
+        f"Run this command manually: {build_manual_install_command(missing)}",
+        "If you use a virtual environment, activate it first and rerun the command.",
     ]
     if details:
-        lines.extend(["", "pip 输出:", details])
+        lines.extend(["", "pip output:", details])
     return "\n".join(lines)
 
 
@@ -70,7 +70,7 @@ def ensure_dependencies(
         return
 
     packages = ", ".join(spec.package_name for spec in missing)
-    printer(f"缺少 Python 依赖，正在尝试自动安装: {packages}")
+    printer(f"Missing Python dependencies. Attempting automatic installation: {packages}")
     result = runner(
         [sys.executable, "-m", "pip", "install", *[spec.package_name for spec in missing]],
         check=False,
@@ -86,4 +86,4 @@ def ensure_dependencies(
     if still_missing:
         raise DependencyBootstrapError(_format_failure_message(still_missing))
 
-    printer("Python 依赖安装完成。")
+    printer("Python dependencies installed successfully.")

@@ -1,316 +1,369 @@
 """Download the latest APK/XAPK package from apkcombo.com by package name."""
 
+from __future__ import annotations
+
 import argparse
 import base64
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
-from urllib.parse import urljoin, urlparse, parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from dependency_bootstrap import DependencyBootstrapError, DependencySpec, ensure_dependencies
+from workspace_manager import (
+    WorkspaceLimitError,
+    create_package_workspace,
+    ensure_workspace_capacity,
+    resolve_workspace_root,
+)
 
-try:
+BASE_URL = "https://apkcombo.com"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://apkcombo.com/",
+}
+XID_PATTERN = re.compile(r'var\s+xid\s*=\s*"([^"]+)"')
+requests = None
+BeautifulSoup = None
+
+
+def ensure_download_dependencies():
+    """Load download dependencies only when they are actually needed."""
+
+    global requests, BeautifulSoup
+    if requests is not None and BeautifulSoup is not None:
+        return
+
     ensure_dependencies(
         [
             DependencySpec("requests"),
             DependencySpec("beautifulsoup4", "bs4"),
         ]
     )
-    import requests
-    from bs4 import BeautifulSoup
-except DependencyBootstrapError as exc:
-    print(exc)
-    sys.exit(1)
 
+    import requests as requests_module
+    from bs4 import BeautifulSoup as beautiful_soup_class
 
-BASE_URL = "https://apkcombo.com"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://apkcombo.com/",
-}
+    requests = requests_module
+    BeautifulSoup = beautiful_soup_class
 
 
 def get_session():
+    ensure_download_dependencies()
     session = requests.Session()
     session.headers.update(HEADERS)
     return session
 
 
+def extract_xid_from_html(html_text):
+    """Extract the internal APKCombo xid token from a download page."""
+
+    match = XID_PATTERN.search(html_text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def classify_variant_file_type(label, resolved_url):
+    """Classify a variant as APK or XAPK from text and URL hints."""
+
+    joined = f"{label or ''} {resolved_url or ''}".upper()
+    if "XAPK" in joined or "/XAPK/" in joined or "/APG/" in joined:
+        return "xapk"
+    return "apk"
+
+
+def parse_variant_links(html_text):
+    """Parse variant entries returned by APKCombo's internal dl endpoint."""
+
+    ensure_download_dependencies()
+    soup = BeautifulSoup(html_text, "html.parser")
+    variants = []
+    for link in soup.select("a.variant"):
+        href = link.get("href", "").strip()
+        if not href:
+            continue
+        label = " ".join(link.get_text(" ", strip=True).split())
+        full_url = urljoin(BASE_URL, href)
+        variants.append(
+            {
+                "label": label,
+                "href": full_url,
+                "type": classify_variant_file_type(label, full_url),
+            }
+        )
+    return variants
+
+
+def select_variant(variants, preferred_type=None):
+    """Pick the preferred variant when available, otherwise return the first."""
+
+    if not variants:
+        return None
+    if preferred_type:
+        preferred_type = preferred_type.lower()
+        for variant in variants:
+            if variant["type"] == preferred_type:
+                return variant
+    return variants[0]
+
+
 def search_app(session, package_name):
-    """通过包名搜索应用，返回应用页面 URL 和应用名称"""
+    """Search apkcombo by package name and return the resolved app page."""
+
     search_url = f"{BASE_URL}/search/{package_name}"
-    print(f"[1/5] 搜索应用: {search_url}")
+    print(f"[1/4] Searching app page: {search_url}")
 
-    resp = session.get(search_url, allow_redirects=True)
-    resp.raise_for_status()
+    response = session.get(search_url, allow_redirects=True)
+    response.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-
+    soup = BeautifulSoup(response.text, "html.parser")
     title_el = soup.select_one("h1.app_name")
     app_name = title_el.get_text(strip=True) if title_el else package_name
+    app_url = response.url
 
-    app_url = resp.url
-    print(f"    应用名称: {app_name}")
-    print(f"    应用页面: {app_url}")
-
+    print(f"    App name: {app_name}")
+    print(f"    App page: {app_url}")
     return app_url, app_name, soup
 
 
-def find_download_variants(session, app_url, soup):
-    """从应用页面找到可用的下载类型及其下载页 URL"""
-    print(f"[2/5] 查找下载选项...")
+def find_download_variants(app_url, soup):
+    """Find candidate APK/XAPK download pages from the app page."""
 
+    print("[2/4] Discovering download pages...")
     variants = []
     download_links = soup.select("a.download_apk_btn, a[href*='/download/']")
     for link in download_links:
         href = link.get("href", "")
         text = link.get_text(strip=True)
-        if "/download/" in href:
-            full_url = urljoin(app_url, href)
-            file_type = "XAPK" if "xapk" in href.lower() or "xapk" in text.lower() else "APK"
-            variants.append({"type": file_type, "url": full_url, "text": text})
+        if "/download/" not in href:
+            continue
+        full_url = urljoin(app_url, href)
+        file_type = "xapk" if "xapk" in href.lower() or "xapk" in text.lower() else "apk"
+        variants.append({"type": file_type, "url": full_url, "text": text})
 
     if not variants:
         path = urlparse(app_url).path.rstrip("/")
-        apk_download_url = f"{BASE_URL}{path}/download/apk"
-        variants.append({"type": "APK", "url": apk_download_url, "text": "Download APK"})
+        variants.append(
+            {
+                "type": "apk",
+                "url": f"{BASE_URL}{path}/download/apk",
+                "text": "Download APK",
+            }
+        )
 
-    seen = set()
     unique_variants = []
-    for v in variants:
-        if v["url"] not in seen:
-            seen.add(v["url"])
-            unique_variants.append(v)
-            print(f"    发现: [{v['type']}] {v['text']}")
+    seen = set()
+    for variant in variants:
+        if variant["url"] in seen:
+            continue
+        seen.add(variant["url"])
+        unique_variants.append(variant)
+        print(f"    Found: [{variant['type'].upper()}] {variant['text']}")
 
     return unique_variants
 
 
-def checkin(session):
-    """调用 /checkin 端点获取 fp 和 ip 参数"""
-    print(f"[3/5] 获取下载令牌...")
-    resp = session.post(f"{BASE_URL}/checkin", headers={"Referer": BASE_URL})
-    token_str = resp.text.strip()
-    print(f"    令牌: {token_str}")
-    return token_str
+def fetch_variant_listing(session, download_page_url, package_name):
+    """Resolve APKCombo's internal variant listing HTML for a download page."""
 
+    print("[3/4] Resolving download variants...")
+    response = session.get(download_page_url)
+    response.raise_for_status()
 
-def decode_base64_url(combo_url):
-    """从 /d?u=<base64> URL 中解码出真实下载地址"""
-    parsed = urlparse(combo_url)
-    params = parse_qs(parsed.query)
-    if "u" not in params:
-        return combo_url
-    encoded = params["u"][0]
-    padding = 4 - len(encoded) % 4
-    if padding != 4:
-        encoded += "=" * padding
-    try:
-        return base64.b64decode(encoded).decode("utf-8")
-    except Exception:
-        return combo_url
+    xid = extract_xid_from_html(response.text)
+    if not xid:
+        raise RuntimeError("Could not extract the APKCombo xid token from the download page.")
 
-
-def get_download_url(session, download_page_url, package_name, token_str):
-    """访问下载页面，提取最终的下载链接。返回 (url, file_type)"""
-    print(f"[4/5] 解析下载链接...")
-
-    resp = session.get(download_page_url)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # 查找下载链接 (按优先级)
-    variant_links = (
-        soup.select("a.variant") or
-        soup.select("a[href*='/d?']") or
-        soup.select("a[href*='pureapk'], a[href*='u=aH']")
+    variant_url = f"{download_page_url.rstrip('/')}/{xid}/dl"
+    variant_response = session.post(
+        variant_url,
+        data={"package_name": package_name, "version": ""},
+        headers={"Referer": download_page_url},
     )
-
-    if not variant_links:
-        print("    错误: 未找到下载链接")
-        return None, "apk"
-
-    for link in variant_links:
-        href = link.get("href", "")
-        if not href:
-            continue
-
-        full_url = urljoin(BASE_URL, href)
-
-        # 附加 checkin 令牌
-        sep = "&" if "?" in full_url else "?"
-        full_url_with_token = f"{full_url}{sep}{token_str}&package_name={package_name}&lang=en"
-
-        # 解码出 download.pureapk.com 的真实 URL
-        if "/d?" in full_url and "u=" in full_url:
-            real_url = decode_base64_url(full_url_with_token)
-        else:
-            real_url = full_url_with_token
-
-        text = link.get_text(strip=True)
-        print(f"    下载项: {text[:80] if text else 'APK'}")
-
-        # 从 variant 文本和 URL 路径中检测真实文件格式
-        text_upper = text.upper() if text else ""
-        url_upper = real_url.upper()
-        if "XAPK" in text_upper or "/XAPK/" in url_upper or "/APG/" in url_upper:
-            file_type = "xapk"
-        else:
-            file_type = "apk"
-
-        return real_url, file_type
-
-    return None, "apk"
+    variant_response.raise_for_status()
+    return variant_response.text
 
 
-def download_with_curl(url, output_dir, package_name, file_type="apk"):
-    """
-    使用 curl 下载文件。
-    curl 的 TLS 指纹能通过 pureapk.com/winudf.com 的反爬检测，
-    而 Python requests 会被识别并重定向到 403 页面。
-    """
-    print(f"[5/5] 开始下载 (curl)...")
+def get_download_url(session, download_page_url, package_name, preferred_type=None):
+    """Return the selected APK/XAPK download URL and resolved file type."""
 
-    # 从 URL 参数中提取文件名
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
+    variants_html = fetch_variant_listing(session, download_page_url, package_name)
+    variants = parse_variant_links(variants_html)
+    if not variants:
+        raise RuntimeError("No downloadable APK/XAPK variants were found in the APKCombo response.")
+
+    variant = select_variant(variants, preferred_type=preferred_type)
+    if not variant:
+        raise RuntimeError("No APK/XAPK variant could be selected.")
+
+    print(f"    Selected variant: {variant['label'] or variant['type'].upper()}")
+    return variant["href"], variant["type"]
+
+
+def build_output_filename(url, package_name, file_type="apk"):
+    """Build a best-effort output file name from the variant URL."""
+
+    params = parse_qs(urlparse(url).query)
     filename = None
     if "_fn" in params:
-        filename = unquote(base64.b64decode(params["_fn"][0] + "==").decode("utf-8", errors="ignore"))
+        encoded_name = params["_fn"][0]
+        padding = "=" * ((4 - len(encoded_name) % 4) % 4)
+        try:
+            filename = unquote(
+                base64.b64decode(encoded_name + padding).decode("utf-8", errors="ignore")
+            )
+        except Exception:
+            filename = None
 
-    # 确保文件后缀与实际格式一致
-    ext = f".{file_type}"
+    extension = f".{file_type}"
     if filename:
-        # 替换错误的后缀
         if filename.endswith(".apk") and file_type == "xapk":
             filename = filename[:-4] + ".xapk"
         elif filename.endswith(".xapk") and file_type == "apk":
             filename = filename[:-5] + ".apk"
-        elif not (filename.endswith(".apk") or filename.endswith(".xapk")):
-            filename += ext
+        elif not filename.endswith((".apk", ".xapk")):
+            filename += extension
     else:
-        filename = f"{package_name}{ext}"
+        filename = f"{package_name}{extension}"
 
-    # 清理文件名中的非法字符
-    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    return re.sub(r'[<>:"/\\|?*]', "_", filename)
+
+
+def download_with_curl(url, output_dir, package_name, file_type="apk"):
+    """Download the final artifact with curl for more reliable redirect handling."""
+
+    print("[4/4] Downloading package with curl...")
+    filename = build_output_filename(url, package_name, file_type=file_type)
     filepath = os.path.join(output_dir, filename)
 
-    print(f"    文件名: {filename}")
-    print(f"    保存到: {filepath}")
+    print(f"    File name: {filename}")
+    print(f"    Output path: {filepath}")
 
-    # 使用 curl 下载，带进度条
-    download_cmd = [
-        "curl", "-L",
-        "-o", filepath,
+    command = [
+        "curl",
+        "-L",
+        "-o",
+        filepath,
         "--progress-bar",
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "-H", "Sec-Fetch-Dest: document",
-        "-H", "Sec-Fetch-Mode: navigate",
-        "-H", "Sec-Fetch-Site: none",
-        "-H", "Sec-Fetch-User: ?1",
-        "--max-redirs", "10",
+        "-H",
+        f"User-Agent: {HEADERS['User-Agent']}",
+        "-H",
+        "Sec-Fetch-Dest: document",
+        "-H",
+        "Sec-Fetch-Mode: navigate",
+        "-H",
+        "Sec-Fetch-Site: none",
+        "-H",
+        "Sec-Fetch-User: ?1",
+        "--max-redirs",
+        "10",
         "--fail",
         url,
     ]
 
-    print(f"    下载中...")
-    result = subprocess.run(download_cmd, capture_output=False)
-
+    print("    Downloading...")
+    result = subprocess.run(command, capture_output=False)
     if result.returncode != 0:
-        print(f"    curl 下载失败 (exit code: {result.returncode})")
+        print(f"    curl download failed (exit code: {result.returncode})")
         return None
 
     file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
     if file_size < 1024:
-        # 文件太小，可能是错误页面
-        print(f"    警告: 文件仅 {file_size} 字节，可能不是有效的 APK")
-        with open(filepath, "r", errors="ignore") as f:
-            content = f.read(500)
+        print(f"    Warning: downloaded file is only {file_size} bytes.")
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as file_handle:
+            content = file_handle.read(500)
         if "<html" in content.lower():
-            print(f"    错误: 下载到的是 HTML 页面，非 APK 文件")
+            print("    Error: received an HTML page instead of an APK/XAPK artifact.")
             os.remove(filepath)
             return None
 
-    print(f"    下载完成: {filepath} ({file_size / 1024 / 1024:.1f} MB)")
+    print(f"    Download complete: {filepath} ({file_size / 1024 / 1024:.1f} MB)")
+    return filepath
+
+
+def download_package(package_name, output_dir, preferred_type=None):
+    """Download a package artifact into the provided directory."""
+
+    session = get_session()
+    app_url, _app_name, app_soup = search_app(session, package_name)
+    variants = find_download_variants(app_url, app_soup)
+    if not variants:
+        raise RuntimeError("No APK/XAPK download page was found.")
+
+    download_page = select_variant(variants, preferred_type=preferred_type)
+    download_url, file_type = get_download_url(
+        session=session,
+        download_page_url=download_page["url"],
+        package_name=package_name,
+        preferred_type=preferred_type,
+    )
+    print(f"    File type: {file_type.upper()}")
+
+    filepath = download_with_curl(download_url, output_dir, package_name, file_type=file_type)
+    if not filepath:
+        raise RuntimeError("Download failed.")
     return filepath
 
 
 def main():
-    parser = argparse.ArgumentParser(description="从 apkcombo.com 下载 APK/XAPK")
-    parser.add_argument("package_name", help="应用包名，如 com.whatsapp")
-    parser.add_argument("--output", "-o", default=".", help="输出目录 (默认当前目录)")
-    parser.add_argument("--type", "-t", choices=["apk", "xapk"],
-                        help="指定下载类型: apk 或 xapk (默认自动选择最新版本)")
+    parser = argparse.ArgumentParser(description="Download APK/XAPK packages from apkcombo.com.")
+    parser.add_argument("package_name", help="Application package name, for example com.whatsapp")
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Workspace root directory (default: .cache/android-app-analyzer under the repository)",
+    )
+    parser.add_argument("--type", "-t", choices=["apk", "xapk"], help="Preferred file type: apk or xapk")
     args = parser.parse_args()
 
-    output_dir = os.path.abspath(args.output)
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 检查 curl
     try:
         subprocess.run(["curl", "--version"], capture_output=True, check=True)
     except FileNotFoundError:
-        print("错误: 需要 curl，请先安装 curl")
+        print("Error: curl is required but was not found in PATH.")
         sys.exit(1)
-
-    session = get_session()
 
     try:
-        # Step 1: 搜索应用
-        app_url, app_name, app_soup = search_app(session, args.package_name)
+        workspace_root = resolve_workspace_root(
+            repo_root=Path(__file__).resolve().parent,
+            output_root=Path(args.output) if args.output else None,
+        )
+        warning = ensure_workspace_capacity(workspace_root)
+        if warning:
+            print(f"Warning: {warning}")
+        workspace = create_package_workspace(workspace_root, args.package_name)
 
-        # Step 2: 查找下载选项
-        variants = find_download_variants(session, app_url, app_soup)
-        if not variants:
-            print("错误: 未找到任何下载选项")
-            sys.exit(1)
-
-        # 选择下载类型: 指定了 --type 就按类型筛选，否则直接取第一个(最新版本)
-        if args.type:
-            preferred_type = args.type.upper()
-            selected = None
-            for v in variants:
-                if v["type"] == preferred_type:
-                    selected = v
-                    break
-            if not selected:
-                selected = variants[0]
-                print(f"    未找到 {preferred_type} 类型，使用: {selected['type']}")
-        else:
-            selected = variants[0]
-
-        # Step 3: 获取 checkin 令牌
-        token_str = checkin(session)
-
-        # Step 4: 获取最终下载链接
-        download_url, file_type = get_download_url(session, selected["url"], args.package_name, token_str)
-        if not download_url:
-            print("错误: 无法获取下载链接")
-            sys.exit(1)
-
-        print(f"    文件格式: {file_type.upper()}")
-
-        # Step 5: 用 curl 下载文件
-        filepath = download_with_curl(download_url, output_dir, args.package_name, file_type)
-        if filepath:
-            print(f"\n完成! 文件已保存至: {filepath}")
-        else:
-            print("\n下载失败")
-            sys.exit(1)
-
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP 错误: {e}")
+        print(f"Workspace: {workspace.package_dir}")
+        filepath = download_package(
+            package_name=args.package_name,
+            output_dir=str(workspace.downloads_dir),
+            preferred_type=args.type,
+        )
+        print(f"\nDone. File saved to: {filepath}")
+    except requests.exceptions.HTTPError as exc:
+        print(f"HTTP error: {exc}")
+        sys.exit(1)
+    except DependencyBootstrapError as exc:
+        print(exc)
+        sys.exit(1)
+    except WorkspaceLimitError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\n用户取消下载")
+        print("\nDownload cancelled by user.")
         sys.exit(1)
-    except Exception as e:
-        print(f"错误: {e}")
+    except Exception as exc:
+        print(f"Error: {exc}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
