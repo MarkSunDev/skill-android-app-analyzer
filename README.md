@@ -2,7 +2,7 @@
 
 # Android App Analyzer
 
-A Claude Code marketplace-compatible and Codex-compatible skill source package for downloading Android APK/XAPK files, extracting manifest metadata, and generating structured analysis reports for research, competitive analysis, and SDK inspection.
+A Claude Code marketplace-compatible, Codex-compatible, and Gemini CLI extension-compatible skill source package for downloading Android APK/XAPK files, extracting manifest metadata, and generating structured analysis reports for research, competitive analysis, and SDK inspection.
 
 ## Features
 
@@ -47,6 +47,27 @@ npx skills add MarkSunDev/skill-android-app-analyzer -g -y
 ```
 
 This is the recommended installation path for end users.
+
+### Install as a Gemini CLI Extension
+
+This repository now includes a root `gemini-extension.json`, so it can be installed directly as a Gemini CLI extension:
+
+```bash
+gemini extensions install https://github.com/MarkSunDev/skill-android-app-analyzer
+```
+
+For local development, install or link from an absolute path:
+
+```bash
+gemini extensions install /absolute/path/to/skill-android-app-analyzer
+gemini extensions link /absolute/path/to/skill-android-app-analyzer
+```
+
+To validate the manifest in this repository:
+
+```bash
+gemini extensions validate .
+```
 
 ### Install Python Dependencies Manually
 
@@ -138,6 +159,7 @@ If APKCombo changes its HTML or internal endpoints again, `apkcombo_download.py`
 ## Project Structure
 
 - `.claude-plugin/marketplace.json`: Claude Code marketplace definition for this repository
+- `gemini-extension.json`: Gemini CLI extension manifest
 - `SKILL.md`: Codex skill entry document
 - `android_analyzer.py`: Main analysis workflow
 - `apkcombo_download.py`: APK/XAPK downloader

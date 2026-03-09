@@ -2,7 +2,7 @@
 
 # Android App Analyzer
 
-这是一个同时兼容 Claude Code marketplace 和 Codex 的 skill 源码包，用于下载 Android APK/XAPK、解析 Manifest 信息，并生成结构化分析报告，适合竞品分析、SDK 排查和基础研究场景。
+这是一个同时兼容 Claude Code marketplace、Codex 和 Gemini CLI 扩展机制的 skill 源码包，用于下载 Android APK/XAPK、解析 Manifest 信息，并生成结构化分析报告，适合竞品分析、SDK 排查和基础研究场景。
 
 ## 功能特性
 
@@ -47,6 +47,27 @@ npx skills add MarkSunDev/skill-android-app-analyzer -g -y
 ```
 
 这是普通用户最推荐的安装方式。
+
+### 安装为 Gemini CLI Extension
+
+当前仓库已包含根目录 `gemini-extension.json`，可以直接作为 Gemini CLI 扩展安装：
+
+```bash
+gemini extensions install https://github.com/MarkSunDev/skill-android-app-analyzer
+```
+
+本地开发时，也可以从绝对路径安装或软链接：
+
+```bash
+gemini extensions install /absolute/path/to/skill-android-app-analyzer
+gemini extensions link /absolute/path/to/skill-android-app-analyzer
+```
+
+如果要校验当前仓库的扩展清单，可执行：
+
+```bash
+gemini extensions validate .
+```
 
 ### 手动安装 Python 依赖
 
@@ -138,6 +159,7 @@ python3 android_analyzer.py com.example.app --skip-download
 ## 项目结构
 
 - `.claude-plugin/marketplace.json`: Claude Code marketplace 定义文件
+- `gemini-extension.json`: Gemini CLI 扩展清单文件
 - `SKILL.md`: Codex skill 入口说明
 - `android_analyzer.py`: 主分析流程
 - `apkcombo_download.py`: APK/XAPK 下载器
