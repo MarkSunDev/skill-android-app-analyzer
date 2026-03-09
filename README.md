@@ -1,48 +1,108 @@
-# Codex Skill: Android App Analyzer
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-`android-app-analyzer` 是一个可发布的 Codex skill 源码包，用来分析 Android APK/XAPK 或按包名下载并生成 Manifest 报告。
+# Android App Analyzer
 
-## 能力概览
+A Codex skill source package for downloading Android APK/XAPK files, extracting manifest metadata, and generating structured analysis reports for research, competitive analysis, and SDK inspection.
 
-- 按包名从 apkcombo 下载 APK/XAPK
-- 自动解压 XAPK 并提取 base APK
-- 使用 `androguard` 解析 `AndroidManifest.xml`
-- 检测权限、后台保活策略、推送方案、广告 SDK 和常见第三方服务
-- 输出 Markdown 分析报告
+## Features
 
-## 目录结构
+- Download the latest APK or XAPK from apkcombo by package name
+- Extract the base APK from XAPK packages automatically
+- Parse `AndroidManifest.xml` with `androguard`
+- Detect permissions, background keep-alive strategies, push integrations, ad SDKs, and common third-party services
+- Generate readable Markdown reports for further review
 
-- `SKILL.md`: Codex skill 入口说明
-- `android_analyzer.py`: 主分析脚本
-- `apkcombo_download.py`: APK/XAPK 下载器
-- `dependency_bootstrap.py`: Python 依赖自动安装与失败提示
-- `requirements.txt`: 手动安装依赖时使用
-- `tests/`: 依赖引导逻辑测试
+## Why This Project
 
-## 本地使用
+This project is designed for people who need a fast, scriptable way to inspect Android application packages without relying on the full Android SDK toolchain. It is especially useful for product research, growth analysis, monetization analysis, and lightweight security review.
 
-### 1. 先安装依赖
+## Requirements
+
+- Python 3.8 or later
+- `curl`
+- Network access for dependency installation and package downloads
+
+If `python` points to Python 2 on Windows, use `python3` or `py -3`.
+
+## Installation
+
+### Install as a Codex Skill (Recommended)
+
+Install directly from GitHub with the skills CLI:
+
+```bash
+npx skills add MarkSunDev/skill-android-app-analyzer -g -y
+```
+
+This is the recommended installation path for end users.
+
+### Install Python Dependencies Manually
+
+Install dependencies manually:
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-也可以直接运行脚本。脚本会在发现依赖缺失时尝试自动安装；如果自动安装失败，会打印明确的手动安装命令。
+You can also run the scripts directly. If required Python packages are missing, the scripts will try to install them automatically. If automatic installation fails, a clear manual install command will be printed.
 
-### 2. 运行分析
+## Quick Start
+
+Analyze an app by package name:
 
 ```bash
 python3 android_analyzer.py com.kjvbibleadio.dailyverse
-python3 android_analyzer.py com.example.app --skip-download
+```
+
+Analyze an existing local package:
+
+```bash
 python3 android_analyzer.py path/to/app.apk --output reports
+```
+
+Download only:
+
+```bash
 python3 apkcombo_download.py com.example.app --output downloads
 ```
 
-如果你在 Windows 上发现 `python` 指向 Python 2，请显式使用 `python3` 或 `py -3`。
+Skip download and analyze an existing package in the output directory:
 
-## 安装到 Codex Skill 库
+```bash
+python3 android_analyzer.py com.example.app --skip-download
+```
 
-建议使用软链接把当前项目直接挂到本地 skill 库：
+## Output Files
+
+The analyzer can generate:
+
+- `{package}_analysis.md`
+- `{apk_name}_manifest.xml`
+- Downloaded `.apk` or `.xapk` packages
+- Extracted XAPK directory `{name}_extracted/`
+
+## Project Structure
+
+- `SKILL.md`: Codex skill entry document
+- `android_analyzer.py`: Main analysis workflow
+- `apkcombo_download.py`: APK/XAPK downloader
+- `dependency_bootstrap.py`: Shared dependency bootstrap logic
+- `requirements.txt`: Python dependency list
+- `tests/`: Unit tests for dependency bootstrap behavior
+- `docs/plans/`: Design and implementation notes
+
+## Dependency Handling
+
+This project uses a dual-path dependency strategy:
+
+- Preferred: install dependencies up front with `requirements.txt`
+- Fallback: let the script attempt automatic installation on first run
+
+If automatic installation fails, the script prints the exact `pip install` command you need to run manually.
+
+## Install as a Codex Skill for Local Development
+
+To use this project directly from your local Codex skill library, create a symbolic link:
 
 ```powershell
 New-Item -ItemType SymbolicLink `
@@ -50,11 +110,21 @@ New-Item -ItemType SymbolicLink `
   -Target "C:\\path\\to\\this\\project"
 ```
 
-## npm 包定位
+## npm Package
 
-这个包按 `skill-source` 思路分发，重点是交付 skill 文件和 Python 实现，而不是把 Python 逻辑重新包装成 Node CLI。
+This repository is distributed as a `skill-source` style npm package. The npm package ships the Codex skill files and Python implementation, but it is not the primary installation path for end users.
 
-## 测试
+Use this repository with:
+
+```bash
+npx skills add MarkSunDev/skill-android-app-analyzer -g -y
+```
+
+Do not use unrelated commands such as `npx skill ...` for this project. That targets a different npm package and will fail.
+
+## Testing
+
+Run the unit tests with:
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -62,4 +132,4 @@ python3 -m unittest discover -s tests -v
 
 ## License
 
-MIT
+Released under the MIT License.
