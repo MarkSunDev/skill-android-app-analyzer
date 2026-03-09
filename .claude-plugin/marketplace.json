@@ -1,0 +1,37 @@
+{
+  "name": "marksundev-skills",
+  "owner": {
+    "name": "MarkSunDev",
+    "url": "https://github.com/MarkSunDev"
+  },
+  "metadata": {
+    "description": "Claude Code marketplace entries published by MarkSunDev.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "android-app-analyzer",
+      "description": "Analyze Android APK/XAPK packages by package name or local file, inspect manifest metadata, background strategies, ad SDKs, and third-party services.",
+      "source": "./",
+      "strict": false,
+      "version": "0.2.0",
+      "author": {
+        "name": "MarkSunDev",
+        "url": "https://github.com/MarkSunDev"
+      },
+      "license": "MIT",
+      "keywords": [
+        "android",
+        "apk",
+        "xapk",
+        "manifest",
+        "skills",
+        "claude-code",
+        "androguard"
+      ],
+      "skills": [
+        "./"
+      ]
+    }
+  ]
+}

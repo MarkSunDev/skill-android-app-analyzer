@@ -2,7 +2,7 @@
 
 # Android App Analyzer
 
-A Codex skill source package for downloading Android APK/XAPK files, extracting manifest metadata, and generating structured analysis reports for research, competitive analysis, and SDK inspection.
+A Claude Code marketplace-compatible and Codex-compatible skill source package for downloading Android APK/XAPK files, extracting manifest metadata, and generating structured analysis reports for research, competitive analysis, and SDK inspection.
 
 ## Features
 
@@ -26,6 +26,17 @@ This project is designed for people who need a fast, scriptable way to inspect A
 If `python` points to Python 2 on Windows, use `python3` or `py -3`.
 
 ## Installation
+
+### Install as a Claude Code Marketplace Plugin
+
+This repository now includes a root `.claude-plugin/marketplace.json`, so it can be added directly as a Claude Code plugin marketplace:
+
+```bash
+/plugin marketplace add MarkSunDev/skill-android-app-analyzer
+/plugin install android-app-analyzer@marksundev-skills
+```
+
+The marketplace name is `marksundev-skills` and the plugin name is `android-app-analyzer`.
 
 ### Install as a Codex Skill (Recommended)
 
@@ -126,6 +137,7 @@ If APKCombo changes its HTML or internal endpoints again, `apkcombo_download.py`
 
 ## Project Structure
 
+- `.claude-plugin/marketplace.json`: Claude Code marketplace definition for this repository
 - `SKILL.md`: Codex skill entry document
 - `android_analyzer.py`: Main analysis workflow
 - `apkcombo_download.py`: APK/XAPK downloader

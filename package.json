@@ -1,7 +1,7 @@
 {
   "name": "codex-skill-android-app-analyzer",
-  "version": "0.1.1",
-  "description": "Codex skill source package for analyzing Android APK/XAPK files and generating manifest-based reports.",
+  "version": "0.2.0",
+  "description": "Claude Code and Codex skill source package for analyzing Android APK/XAPK files and generating manifest-based reports.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -12,6 +12,7 @@
   },
   "homepage": "https://github.com/MarkSunDev/skill-android-app-analyzer#readme",
   "files": [
+    ".claude-plugin/marketplace.json",
     "SKILL.md",
     "README.md",
     "README.zh-CN.md",
@@ -24,6 +25,8 @@
   ],
   "keywords": [
     "codex-skill",
+    "claude-code",
+    "agent-skills",
     "skill",
     "android",
     "apk",

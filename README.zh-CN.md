@@ -2,7 +2,7 @@
 
 # Android App Analyzer
 
-这是一个面向 Codex 的 skill 源码包，用于下载 Android APK/XAPK、解析 Manifest 信息，并生成结构化分析报告，适合竞品分析、SDK 排查和基础研究场景。
+这是一个同时兼容 Claude Code marketplace 和 Codex 的 skill 源码包，用于下载 Android APK/XAPK、解析 Manifest 信息，并生成结构化分析报告，适合竞品分析、SDK 排查和基础研究场景。
 
 ## 功能特性
 
@@ -26,6 +26,17 @@
 如果 Windows 上的 `python` 指向 Python 2，请显式使用 `python3` 或 `py -3`。
 
 ## 安装
+
+### 安装为 Claude Code Marketplace Plugin
+
+当前仓库已经补充了根目录 `.claude-plugin/marketplace.json`，可以直接作为 Claude Code 的 marketplace 仓库添加：
+
+```bash
+/plugin marketplace add MarkSunDev/skill-android-app-analyzer
+/plugin install android-app-analyzer@marksundev-skills
+```
+
+其中 marketplace 名称是 `marksundev-skills`，插件名是 `android-app-analyzer`。
 
 ### 安装为 Codex Skill（推荐）
 
@@ -126,6 +137,7 @@ python3 android_analyzer.py com.example.app --skip-download
 
 ## 项目结构
 
+- `.claude-plugin/marketplace.json`: Claude Code marketplace 定义文件
 - `SKILL.md`: Codex skill 入口说明
 - `android_analyzer.py`: 主分析流程
 - `apkcombo_download.py`: APK/XAPK 下载器
