@@ -1,5 +1,5 @@
 {
-  "name": "codex-skill-android-app-analyzer",
+  "name": "skill-android-app-analyzer",
   "version": "0.2.0",
   "description": "Claude Code and Codex skill source package for analyzing Android APK/XAPK files and generating manifest-based reports.",
   "license": "MIT",
