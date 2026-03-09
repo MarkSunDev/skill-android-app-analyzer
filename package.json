@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/MarkSunDev/codex-skill-android-app-analyzer.git"
+    "url": "git+ssh://git@github.com/MarkSunDev/skill-android-app-analyzer.git"
   },
   "bugs": {
-    "url": "https://github.com/MarkSunDev/codex-skill-android-app-analyzer/issues"
+    "url": "https://github.com/MarkSunDev/skill-android-app-analyzer/issues"
   },
-  "homepage": "https://github.com/MarkSunDev/codex-skill-android-app-analyzer#readme",
+  "homepage": "https://github.com/MarkSunDev/skill-android-app-analyzer#readme",
   "files": [
     "SKILL.md",
     "README.md",
