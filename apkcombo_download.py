@@ -71,6 +71,24 @@ def extract_xid_from_html(html_text):
     return match.group(1)
 
 
+def collapse_whitespace(text):
+    """Normalize page text fragments into readable single-line strings."""
+
+    return " ".join((text or "").split())
+
+
+def extract_app_name(soup, fallback_name):
+    """Extract the human-readable app name from current or legacy APKCombo pages."""
+
+    for selector in ("h1.app_name", ".app_name h1", ".app_header .info h1", "h1.title.heading"):
+        title_el = soup.select_one(selector)
+        if title_el:
+            text = collapse_whitespace(title_el.get_text(" ", strip=True))
+            if text:
+                return text
+    return fallback_name
+
+
 def classify_variant_file_type(label, resolved_url):
     """Classify a variant as APK or XAPK from text and URL hints."""
 
@@ -90,7 +108,7 @@ def parse_variant_links(html_text):
         href = link.get("href", "").strip()
         if not href:
             continue
-        label = " ".join(link.get_text(" ", strip=True).split())
+        label = collapse_whitespace(link.get_text(" ", strip=True))
         full_url = urljoin(BASE_URL, href)
         variants.append(
             {
@@ -102,10 +120,10 @@ def parse_variant_links(html_text):
     return variants
 
 
-def fetch_checkin_token(session):
+def fetch_checkin_token(session, referer=BASE_URL):
     """Fetch the APKCombo checkin token required by direct variant links."""
 
-    response = session.post(f"{BASE_URL}/checkin", headers={"Referer": BASE_URL})
+    response = session.post(f"{BASE_URL}/checkin", headers={"Referer": referer or BASE_URL})
     response.raise_for_status()
     return response.text.strip()
 
@@ -115,6 +133,24 @@ def append_checkin_token(download_url, token, package_name):
 
     separator = "&" if "?" in download_url else "?"
     return f"{download_url}{separator}{token}&package_name={package_name}&lang=en"
+
+
+def infer_preferred_type_from_download_page_url(download_page_url):
+    """Infer the intended artifact type from an APKCombo download page URL."""
+
+    last_segment = urlparse(download_page_url).path.rstrip("/").rsplit("/", 1)[-1].lower()
+    if "xapk" in last_segment:
+        return "xapk"
+    if "apk" in last_segment:
+        return "apk"
+    return None
+
+
+def is_requests_http_error(exc):
+    """Check whether an exception is requests' HTTPError without requiring eager imports."""
+
+    http_error_type = getattr(getattr(requests, "exceptions", None), "HTTPError", None)
+    return bool(http_error_type and isinstance(exc, http_error_type))
 
 
 def select_variant(variants, preferred_type=None):
@@ -140,8 +176,7 @@ def search_app(session, package_name):
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    title_el = soup.select_one("h1.app_name")
-    app_name = title_el.get_text(strip=True) if title_el else package_name
+    app_name = extract_app_name(soup, package_name)
     app_url = response.url
 
     print(f"    App name: {app_name}")
@@ -157,7 +192,7 @@ def find_download_variants(app_url, soup):
     download_links = soup.select("a.download_apk_btn, a[href*='/download/']")
     for link in download_links:
         href = link.get("href", "")
-        text = link.get_text(strip=True)
+        text = collapse_whitespace(link.get_text(" ", strip=True))
         if "/download/" not in href:
             continue
         full_url = urljoin(app_url, href)
@@ -210,15 +245,18 @@ def fetch_variant_listing(session, download_page_url, package_name):
 def get_download_url(session, download_page_url, package_name, preferred_type=None):
     """Return the selected APK/XAPK download URL and resolved file type."""
 
+    effective_preferred_type = preferred_type or infer_preferred_type_from_download_page_url(
+        download_page_url
+    )
     download_page_response = session.get(download_page_url)
     download_page_response.raise_for_status()
 
     variants = parse_variant_links(download_page_response.text)
     if variants:
-        variant = select_variant(variants, preferred_type=preferred_type)
+        variant = select_variant(variants, preferred_type=effective_preferred_type)
         if not variant:
             raise RuntimeError("No APK/XAPK variant could be selected.")
-        token = fetch_checkin_token(session)
+        token = fetch_checkin_token(session, referer=download_page_url)
         final_url = append_checkin_token(variant["href"], token, package_name)
         print(f"    Selected variant: {variant['label'] or variant['type'].upper()}")
         return final_url, variant["type"]
@@ -232,7 +270,7 @@ def get_download_url(session, download_page_url, package_name, preferred_type=No
     if not variants:
         raise RuntimeError("No downloadable APK/XAPK variants were found in the APKCombo response.")
 
-    variant = select_variant(variants, preferred_type=preferred_type)
+    variant = select_variant(variants, preferred_type=effective_preferred_type)
     if not variant:
         raise RuntimeError("No APK/XAPK variant could be selected.")
 
@@ -380,9 +418,6 @@ def main():
             preferred_type=args.type,
         )
         print(f"\nDone. File saved to: {filepath}")
-    except requests.exceptions.HTTPError as exc:
-        print(f"HTTP error: {exc}")
-        sys.exit(1)
     except DependencyBootstrapError as exc:
         print(exc)
         sys.exit(1)
@@ -393,6 +428,9 @@ def main():
         print("\nDownload cancelled by user.")
         sys.exit(1)
     except Exception as exc:
+        if is_requests_http_error(exc):
+            print(f"HTTP error: {exc}")
+            sys.exit(1)
         print(f"Error: {exc}")
         import traceback
 

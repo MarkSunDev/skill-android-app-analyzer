@@ -158,10 +158,16 @@ The downloader now follows APKCombo's current flow:
 
 1. Open the resolved app page.
 2. Find the download page.
-3. Extract the internal `xid` value from page script content.
-4. POST to `/<xid>/dl`.
-5. Parse returned variant links.
-6. Download the selected APK/XAPK with `curl`.
+3. If the download page already contains `a.variant` links, call `/checkin` and append the returned token to the selected variant URL.
+4. Otherwise, extract the internal `xid` value from page script content.
+5. POST to `/<xid>/dl`.
+6. Parse returned variant links and select the best match for the requested page type.
+7. Download the selected APK/XAPK with `curl`.
+
+Notes:
+
+- APKCombo now uses JavaScript to append a `/checkin` token to variant links, but the underlying URLs are still obtainable with normal HTTP requests. A browser is not required.
+- Some APKCombo `download/apk` pages currently resolve to XAPK payloads. The analyzer supports this and will extract the base APK automatically.
 
 If APKCombo changes its HTML or internal endpoints again, `apkcombo_download.py` is the first place to update.
 

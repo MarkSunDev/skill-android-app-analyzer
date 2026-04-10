@@ -158,10 +158,16 @@ python3 android_analyzer.py com.example.app --skip-download
 
 1. 打开解析后的应用页。
 2. 找到下载页。
-3. 从页面脚本中提取内部 `xid`。
-4. 向 `/<xid>/dl` 发起 POST。
-5. 解析返回的变体链接。
-6. 使用 `curl` 下载最终 APK/XAPK。
+3. 如果下载页已经包含 `a.variant` 链接，则调用 `/checkin`，把返回 token 追加到选中的变体链接上。
+4. 否则，从页面脚本中提取内部 `xid`。
+5. 向 `/<xid>/dl` 发起 POST。
+6. 解析返回的变体链接，并按下载页类型选择最匹配的产物。
+7. 使用 `curl` 下载最终 APK/XAPK。
+
+说明：
+
+- APKCombo 现在会用 JavaScript 给变体链接补充 `/checkin` token，但底层请求仍然可以通过普通 HTTP 方式模拟，不需要浏览器自动化。
+- 某些 `download/apk` 页面当前最终返回的仍然是 XAPK。分析器已支持这种情况，并会自动提取其中的 base APK。
 
 如果 APKCombo 后续再次调整页面结构，优先检查和更新 `apkcombo_download.py`。
 
